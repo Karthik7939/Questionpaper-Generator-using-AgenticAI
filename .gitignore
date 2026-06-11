@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+
+# Environment variables (contains secrets!)
+.env
+.env.*
+!.env.example
+
+
+# Runtime / generated
+logs/
+generated_papers/
+uploaded_documents/
+rag/vectorstore/
+rag/logs/
+rag/data/uploads/
+
+# Project specific
+question-paper-generator/.env
+question-paper-generator/logs/
+question-paper-generator/generated_papers/
+question-paper-generator/uploaded_documents/
+question-paper-generator/.venv/
+question-paper-generator/app/__pycache__/
+question-paper-generator/app/agents/__pycache__/
+question-paper-generator/app/models/__pycache__/
+question-paper-generator/app/prompts/__pycache__/
+question-paper-generator/app/services/__pycache__/
+question-paper-generator/app/workflows/__pycache__/
+
+# IDEs and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

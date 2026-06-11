@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RAG Upload & Retrieval</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div class="container">
+      <h1>Upload Documents</h1>
+      <form id="uploadForm">
+        <input type="file" id="files" name="files" multiple />
+        <button type="submit">Upload & Ingest</button>
+      </form>
+
+      <h2>Retrieve relevant chunks</h2>
+      <form id="retrieveForm">
+        <input type="text" id="query" placeholder="Enter retrieval query (e.g. syllabus units topics)" />
+        <button type="submit">Retrieve</button>
+      </form>
+
+      <div id="status" class="card"></div>
+
+      <div id="chunks" class="card hidden">
+        <h3>Retrieved Chunks</h3>
+        <div id="chunksText"></div>
+      </div>
+
+      <div id="sources" class="card hidden">
+        <h3>Chunk Sources</h3>
+        <ul id="sourcesList"></ul>
+      </div>
+
+      <div id="debug" class="card hidden">
+        <h3>Debug Details</h3>
+        <div id="debugSummary" class="debug-grid"></div>
+
+        <h4>Selected Evidence</h4>
+        <ol id="evidenceList"></ol>
+      </div>
+    </div>
+
+    <script>
+    const uploadForm = document.getElementById('uploadForm');
+    const retrieveForm = document.getElementById('retrieveForm');
+    const status = document.getElementById('status');
+    const chunksCard = document.getElementById('chunks');
+    const sourcesCard = document.getElementById('sources');
+    const debugCard = document.getElementById('debug');
+
+    uploadForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const files = document.getElementById('files').files;
+      if (!files.length) {
+        status.textContent = 'Select files to upload.';
+        return;
+      }
+      status.textContent = 'Uploading...';
+      const fd = new FormData();
+      for (const f of files) fd.append('files', f);
+
+      const res = await fetch('/upload', { method: 'POST', body: fd });
+      const j = await res.json();
+      if (j.ok) {
+        status.textContent = `Uploaded and ingested ${j.chunk_count} chunks: ` + j.saved.join(', ');
+      } else {
+        status.textContent = 'Upload error: ' + (j.error || 'unknown');
+      }
+    });
+
+    retrieveForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const q = document.getElementById('query').value;
+      if (!q) return;
+      status.textContent = 'Retrieving...';
+      chunksCard.classList.add('hidden');
+      sourcesCard.classList.add('hidden');
+      debugCard.classList.add('hidden');
+
+      const res = await fetch('/retrieve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: q })
+      });
+      const j = await res.json();
+      if (!j.ok) {
+        status.textContent = 'Retrieval error: ' + (j.error || 'unknown');
+        return;
+      }
+      status.textContent = 'Done.';
+      const r = j.result;
+
+      const chunksText = document.getElementById('chunksText');
+      chunksText.textContent = (r.chunks || []).map(
+        (c, i) => `[Chunk ${c.chunk_id} | ${c.source}]\n${c.content}`
+      ).join('\n\n---\n\n');
+      chunksCard.classList.remove('hidden');
+
+      const list = document.getElementById('sourcesList');
+      list.innerHTML = '';
+      if (r.sources && r.sources.length) {
+        for (const s of r.sources) {
+          const li = document.createElement('li');
+          li.innerHTML = `<strong>${s.source}</strong> — chunk ${s.chunk_id} — ${s.first_line} (len ${s.length})`;
+          list.appendChild(li);
+        }
+        sourcesCard.classList.remove('hidden');
+      }
+
+      const debug = r.debug || {};
+      const summary = document.getElementById('debugSummary');
+      summary.innerHTML = '';
+
+      const metrics = [
+        ['Loaded chunks', debug.loaded_chunk_count ?? 'n/a'],
+        ['Retrieved docs', debug.retrieved_count ?? 'n/a'],
+        ['Reranked docs', debug.reranked_count ?? 'n/a'],
+        ['Retrieval ms', debug.timings_ms?.retrieval_ms ?? 'n/a'],
+        ['Rerank ms', debug.timings_ms?.rerank_ms ?? 'n/a'],
+        ['Total ms', debug.timings_ms?.total_ms ?? 'n/a'],
+      ];
+
+      for (const [label, value] of metrics) {
+        const row = document.createElement('div');
+        row.className = 'debug-item';
+        row.innerHTML = `<span>${label}</span><strong>${value}</strong>`;
+        summary.appendChild(row);
+      }
+
+      const evidenceList = document.getElementById('evidenceList');
+      evidenceList.innerHTML = '';
+      if (debug.selected_evidence && debug.selected_evidence.length) {
+        for (const snippet of debug.selected_evidence) {
+          const li = document.createElement('li');
+          li.textContent = snippet;
+          evidenceList.appendChild(li);
+        }
+        debugCard.classList.remove('hidden');
+      }
+    });
+    </script>
+  </body>
+</html>

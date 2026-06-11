@@ -1,0 +1,15 @@
+
+langchain
+langchain-community
+langchain-huggingface
+faiss-cpu
+sentence-transformers
+pymupdf
+python-docx
+python-pptx
+openpyxl
+unstructured
+rank-bm25
+python-dotenv
+pydantic
+loguru
