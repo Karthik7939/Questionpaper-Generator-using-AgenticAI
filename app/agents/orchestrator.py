@@ -72,7 +72,7 @@ class Orchestrator:
     Usage:
         orchestrator = Orchestrator()
         result = orchestrator.run(
-            uploaded_file_path="/path/to/syllabus.pdf",
+            uploaded_file_paths=["/path/to/syllabus.pdf", "/path/to/module2.pdf"],
             distribution={...},
             paper_metadata={...},
         )
@@ -87,7 +87,7 @@ class Orchestrator:
 
     def run(
         self,
-        uploaded_file_path: str,
+        uploaded_file_paths: list[str],
         distribution: QuestionDistribution,
         paper_metadata: Optional[PaperMetadata] = None,
     ) -> OrchestratorResult:
@@ -96,7 +96,7 @@ class Orchestrator:
 
         Steps:
           1. Validate inputs
-          2. Ingest document via RAG (chunk + embed)
+          2. Ingest documents via RAG (chunk + embed)
           3. Retrieve context chunks for agents
           4. Build initial AgentState
           5. Invoke LangGraph workflow
@@ -104,20 +104,23 @@ class Orchestrator:
           7. Return OrchestratorResult
 
         Args:
-            uploaded_file_path: Path to the uploaded syllabus PDF/document.
-            distribution:       Question distribution parameters.
-            paper_metadata:     Optional PDF header metadata.
+            uploaded_file_paths: Paths to uploaded syllabus/course documents.
+            distribution:        Question distribution parameters.
+            paper_metadata:      Optional PDF header metadata.
 
         Returns:
             OrchestratorResult with paths, errors, and timing.
         """
         start_time = time.perf_counter()
-        logger.info("Orchestrator: Starting question paper generation pipeline.")
+        logger.info(
+            f"Orchestrator: Starting question paper generation pipeline "
+            f"with {len(uploaded_file_paths)} file(s)."
+        )
 
         # ------------------------------------------------------------------
         # 1. Validate inputs before entering the workflow
         # ------------------------------------------------------------------
-        validation_errors = self._validate_inputs(uploaded_file_path, distribution)
+        validation_errors = self._validate_inputs(uploaded_file_paths, distribution)
         if validation_errors:
             elapsed = time.perf_counter() - start_time
             for err in validation_errors:
@@ -137,10 +140,10 @@ class Orchestrator:
         rag_debug: dict[str, Any] = {}
         try:
             rag_service = RAGService()
-            rag_chunk_count = rag_service.ingest_file(uploaded_file_path)
+            rag_chunk_count = rag_service.ingest_files(uploaded_file_paths)
             if rag_chunk_count == 0:
-                raise RuntimeError("RAG ingestion produced no chunks from the uploaded file.")
-            contexts = rag_service.prepare_agent_contexts()
+                raise RuntimeError("RAG ingestion produced no chunks from the uploaded file(s).")
+            contexts = rag_service.prepare_agent_contexts(file_count=len(uploaded_file_paths))
             rag_debug = contexts.get("debug", {})
         except Exception as exc:
             elapsed = time.perf_counter() - start_time
@@ -153,7 +156,7 @@ class Orchestrator:
                 errors=[error_msg],
                 elapsed_seconds=elapsed,
                 rag_chunk_count=rag_chunk_count,
-                debug_info={"rag": rag_debug, "uploaded_file": uploaded_file_path},
+                debug_info=self._build_debug_info(rag_debug, {}, uploaded_file_paths),
             )
 
         # ------------------------------------------------------------------
@@ -192,7 +195,7 @@ class Orchestrator:
                 errors=[error_msg],
                 elapsed_seconds=elapsed,
                 rag_chunk_count=rag_chunk_count,
-                debug_info={"rag": rag_debug, "uploaded_file": uploaded_file_path},
+                debug_info=self._build_debug_info(rag_debug, {}, uploaded_file_paths),
             )
 
         # ------------------------------------------------------------------
@@ -215,7 +218,7 @@ class Orchestrator:
                 elapsed_seconds=elapsed,
                 final_state=final_state,
                 rag_chunk_count=rag_chunk_count,
-                debug_info=self._build_debug_info(rag_debug, final_state, uploaded_file_path),
+                debug_info=self._build_debug_info(rag_debug, final_state, uploaded_file_paths),
             )
 
         logger.info("Orchestrator: Workflow completed successfully. Generating PDFs...")
@@ -292,7 +295,7 @@ class Orchestrator:
             elapsed_seconds=elapsed,
             final_state=final_state,
             rag_chunk_count=rag_chunk_count,
-            debug_info=self._build_debug_info(rag_debug, final_state, uploaded_file_path),
+            debug_info=self._build_debug_info(rag_debug, final_state, uploaded_file_paths),
         )
 
     # ------------------------------------------------------------------
@@ -303,7 +306,7 @@ class Orchestrator:
     def _build_debug_info(
         rag_debug: dict[str, Any],
         final_state: dict[str, Any],
-        uploaded_file_path: str,
+        uploaded_file_paths: list[str],
     ) -> dict[str, Any]:
         """Summarise RAG and agent pipeline state for the frontend debug panel."""
         syllabus_topics = final_state.get("syllabus_topics", [])
@@ -312,7 +315,8 @@ class Orchestrator:
         answer_key = final_state.get("answer_key", [])
 
         return {
-            "uploaded_file": Path(uploaded_file_path).name,
+            "uploaded_files": [Path(p).name for p in uploaded_file_paths],
+            "file_count": len(uploaded_file_paths),
             "rag": rag_debug,
             "pipeline": {
                 "status": final_state.get("status"),
@@ -340,7 +344,7 @@ class Orchestrator:
 
     @staticmethod
     def _validate_inputs(
-        uploaded_file_path: str,
+        uploaded_file_paths: list[str],
         distribution: QuestionDistribution,
     ) -> list[str]:
         """
@@ -351,10 +355,14 @@ class Orchestrator:
         """
         errors: list[str] = []
 
-        if not uploaded_file_path or not uploaded_file_path.strip():
-            errors.append("uploaded_file_path is empty. Please upload a valid syllabus document.")
-        elif not Path(uploaded_file_path).is_file():
-            errors.append(f"Uploaded file not found: '{uploaded_file_path}'.")
+        if not uploaded_file_paths:
+            errors.append("No files uploaded. Please upload at least one syllabus document.")
+        else:
+            for file_path in uploaded_file_paths:
+                if not file_path or not str(file_path).strip():
+                    errors.append("One of the uploaded file paths is empty.")
+                elif not Path(file_path).is_file():
+                    errors.append(f"Uploaded file not found: '{file_path}'.")
 
         if not isinstance(distribution, dict):
             errors.append("question_distribution must be a dict.")

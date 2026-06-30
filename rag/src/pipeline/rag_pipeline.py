@@ -58,9 +58,33 @@ class RAGPipeline:
 
     def ingest_file(self, file_path: str, reset: bool = True) -> None:
         """Ingest a single uploaded file, optionally clearing any prior index."""
+        self.ingest_files([file_path], reset=reset)
+
+    def ingest_files(self, file_paths: List[str], reset: bool = True) -> None:
+        """Ingest multiple files into a single shared vector index."""
         if reset:
             self.reset()
-        self.ingest(file_path, update=False)
+
+        all_docs: List[Document] = []
+        for file_path in file_paths:
+            docs = load_document(file_path)
+            if docs:
+                all_docs.extend(docs)
+            else:
+                logger.warning(f"No content loaded from {file_path}")
+
+        if not all_docs:
+            logger.warning("No documents loaded from any file.")
+            return
+
+        chunks = chunk_documents(all_docs)
+        self.all_chunks = chunks
+        self.vectorstore = build_faiss_index(chunks)
+        self.retriever = HybridRetriever(self.vectorstore, self.all_chunks)
+        logger.info(
+            f"Ingestion complete from {len(file_paths)} file(s). "
+            f"{len(self.all_chunks)} chunk(s) indexed."
+        )
 
     def load(self):
         """Load existing FAISS index from disk."""

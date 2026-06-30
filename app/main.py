@@ -87,8 +87,9 @@ class RagPreviewResponse(BaseModel):
     """Response body for the /rag/preview endpoint."""
     success: bool
     message: str
-    file_name: str
-    file_size_mb: float
+    file_names: list[str] = Field(default_factory=list)
+    file_count: int = 0
+    total_size_mb: float = 0.0
     chunk_count: int = 0
     debug: dict = Field(default_factory=dict)
     errors: list[str] = Field(default_factory=list)
@@ -123,37 +124,61 @@ async def health_check() -> HealthResponse:
     )
 
 
-async def _save_and_validate_upload(file: UploadFile) -> tuple[bytes, str, str, float, Path]:
-    """Read, validate, and persist an uploaded file. Returns bytes, name, ext, size_mb, path."""
-    filename = file.filename or ""
-    extension = Path(filename).suffix.lstrip(".").lower()
+def _mime_for_extension(extension: str) -> str:
+    return {
+        "pdf": "application/pdf",
+        "txt": "text/plain",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }.get(extension, "application/octet-stream")
 
-    if extension not in settings.api.ALLOWED_EXTENSIONS:
+
+async def _save_and_validate_uploads(
+    files: list[UploadFile],
+) -> tuple[list[str], list[str], float, list[Path]]:
+    """Read, validate, and persist uploaded files. Returns names, paths, total MB."""
+    if not files:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"Unsupported file type '.{extension}'. "
-                f"Allowed: {settings.api.ALLOWED_EXTENSIONS}"
-            ),
+            detail="No files uploaded. Please upload at least one document.",
         )
 
-    file_bytes = await file.read()
-    size_mb = len(file_bytes) / (1024 * 1024)
+    saved_names: list[str] = []
+    saved_paths: list[Path] = []
+    total_size_mb = 0.0
 
-    if size_mb > settings.api.MAX_UPLOAD_SIZE_MB:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=(
-                f"File size {size_mb:.1f} MB exceeds limit of "
-                f"{settings.api.MAX_UPLOAD_SIZE_MB} MB. "
-                f"Increase MAX_UPLOAD_SIZE_MB in .env if needed."
-            ),
-        )
+    for file in files:
+        filename = file.filename or ""
+        extension = Path(filename).suffix.lstrip(".").lower()
 
-    safe_name = Path(filename).name or f"upload_{uuid4().hex}.{extension}"
-    upload_path = settings.paths.UPLOADED_DOCUMENTS_DIR / safe_name
-    upload_path.write_bytes(file_bytes)
-    return file_bytes, filename, extension, size_mb, upload_path
+        if extension not in settings.api.ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Unsupported file type '.{extension}' in '{filename}'. "
+                    f"Allowed: {settings.api.ALLOWED_EXTENSIONS}"
+                ),
+            )
+
+        file_bytes = await file.read()
+        size_mb = len(file_bytes) / (1024 * 1024)
+        total_size_mb += size_mb
+
+        if size_mb > settings.api.MAX_UPLOAD_SIZE_MB:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=(
+                    f"File '{filename}' is {size_mb:.1f} MB — exceeds per-file limit of "
+                    f"{settings.api.MAX_UPLOAD_SIZE_MB} MB."
+                ),
+            )
+
+        safe_name = Path(filename).name or f"upload_{uuid4().hex}.{extension}"
+        upload_path = settings.paths.UPLOADED_DOCUMENTS_DIR / safe_name
+        upload_path.write_bytes(file_bytes)
+        saved_names.append(safe_name)
+        saved_paths.append(upload_path)
+
+    return saved_names, [str(p) for p in saved_paths], total_size_mb, saved_paths
 
 
 @app.post(
@@ -163,27 +188,31 @@ async def _save_and_validate_upload(file: UploadFile) -> tuple[bytes, str, str, 
     summary="Preview RAG chunking for an uploaded file (no generation)",
 )
 async def rag_preview(
-    file: Annotated[UploadFile, File(description="Syllabus PDF or TXT file to preview")],
+    files: Annotated[list[UploadFile], File(description="Syllabus/course documents to preview")],
 ) -> RagPreviewResponse:
     """
     Run RAG ingestion only and return chunk/debug information.
     Useful for validating uploads before running the full agent pipeline.
     """
     try:
-        _file_bytes, filename, _extension, size_mb, upload_path = await _save_and_validate_upload(file)
+        file_names, upload_paths, total_size_mb, _paths = await _save_and_validate_uploads(files)
     except HTTPException:
         raise
 
-    logger.info(f"RAG preview for '{filename}' ({size_mb:.2f} MB)")
+    logger.info(f"RAG preview for {len(file_names)} file(s) ({total_size_mb:.2f} MB total)")
 
     try:
         rag_service = RAGService()
-        preview = rag_service.preview_file(str(upload_path))
+        preview = rag_service.preview_files(upload_paths)
         return RagPreviewResponse(
             success=True,
-            message=f"RAG preview complete — {preview['chunk_count']} chunk(s) created.",
-            file_name=Path(filename).name,
-            file_size_mb=round(size_mb, 2),
+            message=(
+                f"RAG preview complete — {preview['chunk_count']} chunk(s) "
+                f"from {preview['file_count']} file(s)."
+            ),
+            file_names=file_names,
+            file_count=preview["file_count"],
+            total_size_mb=round(total_size_mb, 2),
             chunk_count=preview["chunk_count"],
             debug=preview["debug"],
         )
@@ -192,8 +221,9 @@ async def rag_preview(
         return RagPreviewResponse(
             success=False,
             message=f"RAG preview failed: {exc}",
-            file_name=Path(filename).name,
-            file_size_mb=round(size_mb, 2),
+            file_names=file_names,
+            file_count=len(file_names),
+            total_size_mb=round(total_size_mb, 2),
             errors=[str(exc)],
         )
 
@@ -206,8 +236,8 @@ async def rag_preview(
     summary="Upload syllabus and generate question paper",
 )
 async def generate_question_paper(
-    # --- File upload ---
-    file: Annotated[UploadFile, File(description="Syllabus PDF or TXT file")],
+    # --- File upload (one or more documents) ---
+    files: Annotated[list[UploadFile], File(description="Syllabus/course PDF, TXT, or DOCX files")],
 
     # --- Question distribution (Form fields) ---
     total_marks: Annotated[int, Form(description="Total marks for the paper")] = 100,
@@ -239,11 +269,11 @@ async def generate_question_paper(
     # ------------------------------------------------------------------
     # Validate, read, and save upload
     # ------------------------------------------------------------------
-    _file_bytes, filename, _extension, size_mb, upload_path = await _save_and_validate_upload(file)
+    file_names, upload_paths, total_size_mb, _paths = await _save_and_validate_uploads(files)
 
     logger.info(
-        f"Received file '{filename}' ({size_mb:.2f} MB), "
-        f"saved to '{upload_path}' for RAG ingestion."
+        f"Received {len(file_names)} file(s) ({total_size_mb:.2f} MB total): "
+        f"{', '.join(file_names)}"
     )
 
     # ------------------------------------------------------------------
@@ -281,7 +311,7 @@ async def generate_question_paper(
         )
 
     result: OrchestratorResult = _orchestrator.run(
-        uploaded_file_path=str(upload_path),
+        uploaded_file_paths=upload_paths,
         distribution=distribution,
         paper_metadata=paper_metadata,
     )
